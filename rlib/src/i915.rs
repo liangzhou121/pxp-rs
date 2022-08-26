@@ -216,6 +216,43 @@ impl DeepCopy<prelim_drm_i915_gem_create_ext> for prelim_drm_i915_gem_create_ext
         self.handle = source.handle;
         self.size = source.size;
         self.pad = source.pad;
+
+        let mut ext_src = source.extensions;
+        let mut ext_dst = &mut self.extensions;
+        while ext_src != 0 {
+            let base_src = unsafe { &mut *(ext_src as *mut i915_user_extension) };
+            if base_src.name & PRELIM_I915_USER_EXT_MASK == 1 {
+                let src = unsafe { &*(ext_src as *mut prelim_drm_i915_gem_create_ext_setparam) };
+                let dst =
+                    unsafe { &mut *(*ext_dst as *mut prelim_drm_i915_gem_create_ext_setparam) };
+                let size = mem::size_of::<prelim_drm_i915_gem_memory_class_instance>()
+                    .checked_mul(src.param.size as usize)
+                    .ok_or(format!("mul error"))?;
+                unsafe {
+                    ptr::copy(src.param.data as *const u8, dst.param.data as *mut u8, size);
+                }
+                dst.param.handle = src.param.handle;
+                dst.param.size = src.param.size;
+                dst.param.param = src.param.param;
+            }
+            else if base_src.name & PRELIM_I915_USER_EXT_MASK == 2 {
+                let src = unsafe { &*(ext_src as *mut prelim_drm_i915_gem_create_ext_vm_private) };
+                let dst =
+                    unsafe { &mut *(*ext_dst as *mut prelim_drm_i915_gem_create_ext_vm_private) };
+                dst.vm_id = src.vm_id;
+            }
+            else if base_src.name & PRELIM_I915_USER_EXT_MASK == 3 {
+                let src = unsafe { &*(ext_src as *mut prelim_drm_i915_gem_create_ext_protected_content) };
+                let dst =
+                    unsafe { &mut *(*ext_dst as *mut prelim_drm_i915_gem_create_ext_protected_content) };
+                dst.flags = src.flags;
+            }
+
+            ext_src = base_src.next_extension;
+            let base_dst = unsafe { &mut *(*ext_dst as *mut i915_user_extension) };
+            ext_dst = &mut base_dst.next_extension;
+        }
+
         Ok(())
     }
     fn free(&mut self) -> Result<(), String> {
@@ -985,7 +1022,7 @@ impl DeepCopy<drm_i915_gem_vm_control> for drm_i915_gem_vm_control {
     }
     fn copy(&mut self, source: &drm_i915_gem_vm_control) -> Result<(), String> {
         self.vm_id = source.vm_id;
-        //self.flags = source.flags;
+        self.flags = source.flags;
         Ok(())
     }
     fn free(&mut self) -> Result<(), String> {
@@ -1190,9 +1227,16 @@ struct drm_i915_gem_pread {
     data_ptr: u64,
 }
 impl DeepCopy<drm_i915_gem_pread> for drm_i915_gem_pread {
-    fn alloc(&mut self, _source: &drm_i915_gem_pread) -> Result<(), String> {
+    fn alloc(&mut self, source: &drm_i915_gem_pread) -> Result<(), String> {
         if self.size > 0 {
             self.data_ptr = alloc(self.size as usize)? as u64;
+            unsafe {
+                ptr::copy(
+                    source.data_ptr as *mut u8,
+                    self.data_ptr as *mut u8,
+                    self.size as usize,
+                );
+            }
         }
         Ok(())
     }
@@ -1239,12 +1283,16 @@ impl DeepCopy<drm_i915_gem_pwrite> for drm_i915_gem_pwrite {
         }
         Ok(())
     }
-    fn copy(&mut self, _source: &drm_i915_gem_pwrite) -> Result<(), String> {
-        /*if self.size > 0 {
+    fn copy(&mut self, source: &drm_i915_gem_pwrite) -> Result<(), String> {
+        if self.size > 0 {
             unsafe {
-                ptr::copy(source.data_ptr as *mut u8, self.data_ptr as *mut u8, self.size as usize);
+                ptr::copy(
+                    source.data_ptr as *mut u8, 
+                    self.data_ptr as *mut u8, 
+                    self.size as usize
+                );
             }
-        }*/
+        }
         Ok(())
     }
     fn free(&mut self) -> Result<(), String> {
@@ -1269,17 +1317,7 @@ struct drm_i915_gem_mmap {
 fn drm_default_ioctl(_fd: i32, cmd: &u32, _arg: *const u8) -> Result<i32, String> {
     info!("unsupported ioctl:{:?} !!!", cmd);
     Err(format!("unsupported ioctl: {:?}", cmd))
-    /*let mut ret: i32 = 0;
-    unsafe {
-        let status = occlum_ocall_device_ioctl(
-            &mut ret as *mut i32,
-            fd,
-            cmd.to_owned() as c_int,
-            arg as u64,
-        );
-        assert!(status == sgx_status_t::SGX_SUCCESS);
-    }
-    Ok(ret)*/
+    //Ok(ioctl(_fd, cmd, _arg))
 }
 
 #[no_mangle]

@@ -41,23 +41,35 @@ const DRM_IOCTL_I915_GEM_PREAD: u32 = 1075864668;
 const DRM_IOCTL_I915_GEM_PWRITE: u32 = 1075864669;
 const DRM_IOCTL_I915_GEM_MMAP: u32 = 3223872606;
 
+#[derive(PartialEq)]
+enum Direction {
+    u2t,
+    t2u,
+    none,
+}
+
 trait DeepCopy<T> {
     fn alloc(&mut self, source: &T) -> Result<(), String>;
-    fn copy(&mut self, source: &T) -> Result<(), String>;
+    fn copy(&mut self, source: &T, direction: Direction) -> Result<(), String>;
     fn free(&mut self) -> Result<(), String>;
 }
 
-fn iterator<F>(mut src: u64, mut dst: &mut u64, f: F) -> Result<(), String>
+#[allow(unused_variables)]
+fn iterator<F>(mut ext_src: u64, mut ext_dst: &mut u64, f: F) -> Result<(), String>
 where
-    F: Fn(&mut u64, u64) -> Result<(), String>,
+    F: Fn(u64, &mut u64) -> Result<(), String>,
 {
-    while src != 0 {
-        f(dst, src).unwrap();
+    while ext_src != 0 {
+        f(ext_src, ext_dst).unwrap();
 
-        let ext_dst = unsafe { &mut *(*dst as *mut i915_user_extension) };
-        let ext_src = unsafe { &*(src as *mut i915_user_extension) };
-        dst = &mut ext_dst.next_extension;
-        src = ext_src.next_extension;
+        //let ext_src = unsafe { &*(src as *mut i915_user_extension) };
+        //src = ext_src.next_extension;
+        //let ext_dst = unsafe { &mut *(*dst as *mut i915_user_extension) };
+        //dst = &mut ext_dst.next_extension;
+        ext_src = unsafe { &*(ext_src as *const i915_user_extension) }
+            .next_extension;
+        ext_dst = &mut unsafe { &mut *(*ext_dst as *mut i915_user_extension) }
+            .next_extension;
     }
     Ok(())
 }
@@ -111,10 +123,15 @@ fn exec2<T: DeepCopy<T>>(fd: i32, cmd: &u32, arg: *const u8) -> Result<i32, Stri
     }
     let arg_t = unsafe { &mut *(ptr_t as *mut T) };
     let arg_u = unsafe { &mut *(ptr_u as *mut T) };
+
     arg_u.alloc(arg_t)?;
+    arg_u.copy(arg_t, Direction::t2u)?;
+
     let ret = ioctl(fd, cmd, ptr_u);
-    arg_t.copy(arg_u)?;
+
+    arg_t.copy(arg_u, Direction::u2t)?;
     arg_u.free()?;
+
     free(ptr_u, mem::size_of::<T>())?;
     Ok(ret)
 }
@@ -181,79 +198,77 @@ impl prelim_drm_i915_gem_create_ext {
             _ => Err(format!("the name:{:?} is illegal !!!", name)),
         }
     }
+    fn iterator(
+        &mut self,
+        source: &prelim_drm_i915_gem_create_ext,
+        f: fn(u64, &mut u64) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let ext_dst = &mut self.extensions;
+        let ext_src = source.extensions;
+        iterator::<_>(ext_src, ext_dst, f)
+    }
 }
 impl DeepCopy<prelim_drm_i915_gem_create_ext> for prelim_drm_i915_gem_create_ext {
     fn alloc(&mut self, source: &prelim_drm_i915_gem_create_ext) -> Result<(), String> {
-        let mut ext_src = source.extensions;
-        let mut ext_dst = &mut self.extensions;
-        while ext_src != 0 {
-            let base_src = unsafe { &mut *(ext_src as *mut i915_user_extension) };
-            let size = Self::sizeof(base_src.name & PRELIM_I915_USER_EXT_MASK)?;
-            *ext_dst = alloc(size as usize)? as u64;
-            unsafe {
-                ptr::copy(ext_src as *const u8, *ext_dst as *mut u8, size);
-            }
-            if base_src.name & PRELIM_I915_USER_EXT_MASK == 1 {
-                let src = unsafe { &*(ext_src as *mut prelim_drm_i915_gem_create_ext_setparam) };
-                let dst =
-                    unsafe { &mut *(*ext_dst as *mut prelim_drm_i915_gem_create_ext_setparam) };
+        self.iterator(source, |src: u64, dst: &mut u64| -> Result<(), String> {
+            let ext_src = unsafe { &*(src as *mut i915_user_extension) };
+            let size = Self::sizeof(ext_src.name & PRELIM_I915_USER_EXT_MASK)?;
+            *dst = alloc(size as usize)? as u64;
+            let ext_dst = unsafe { &mut *(*dst as *mut i915_user_extension) };
+            ext_dst.next_extension = 0;  // Must clean this next extension manually.
+            if ext_src.name & PRELIM_I915_USER_EXT_MASK == 1 {
+                let s = unsafe { &*(src as *mut prelim_drm_i915_gem_create_ext_setparam) };
+                let d =
+                    unsafe { &mut *(*dst as *mut prelim_drm_i915_gem_create_ext_setparam) };
                 let size = mem::size_of::<prelim_drm_i915_gem_memory_class_instance>()
-                    .checked_mul(src.param.size as usize)
+                    .checked_mul(s.param.size as usize)
                     .ok_or(format!("mul error"))?;
-                dst.param.data = alloc(size as usize)? as u64;
-                unsafe {
-                    ptr::copy(src.param.data as *const u8, dst.param.data as *mut u8, size);
-                }
+                d.param.data = alloc(size as usize)? as u64;
             }
-
-            ext_src = base_src.next_extension;
-            let base_dst = unsafe { &mut *(*ext_dst as *mut i915_user_extension) };
-            ext_dst = &mut base_dst.next_extension;
-        }
-        Ok(())
+            Ok(())
+        })
     }
-    fn copy(&mut self, source: &prelim_drm_i915_gem_create_ext) -> Result<(), String> {
+    fn copy(&mut self, source: &prelim_drm_i915_gem_create_ext, _: Direction) -> Result<(), String> {
         self.handle = source.handle;
         self.size = source.size;
         self.pad = source.pad;
-
-        let mut ext_src = source.extensions;
-        let mut ext_dst = &mut self.extensions;
-        while ext_src != 0 {
-            let base_src = unsafe { &mut *(ext_src as *mut i915_user_extension) };
-            if base_src.name & PRELIM_I915_USER_EXT_MASK == 1 {
-                let src = unsafe { &*(ext_src as *mut prelim_drm_i915_gem_create_ext_setparam) };
-                let dst =
-                    unsafe { &mut *(*ext_dst as *mut prelim_drm_i915_gem_create_ext_setparam) };
+        // Copy extensions
+        self.iterator(source, |src: u64, dst: &mut u64| -> Result<(), String> {
+            let ext_src = unsafe { &*(src as *mut i915_user_extension) };
+            let ext_dst = unsafe { &mut *(*dst as *mut i915_user_extension) };
+            // Copy extension
+            ext_dst.name = ext_src.name;
+            ext_dst.flags = ext_src.flags;
+            ext_dst.rsvd = ext_src.rsvd;
+            // Deep copy extension
+            if ext_src.name & PRELIM_I915_USER_EXT_MASK == 1 {
+                let s = unsafe { &*(src as *mut prelim_drm_i915_gem_create_ext_setparam) };
+                let d =
+                    unsafe { &mut *(*dst as *mut prelim_drm_i915_gem_create_ext_setparam) };
                 let size = mem::size_of::<prelim_drm_i915_gem_memory_class_instance>()
-                    .checked_mul(src.param.size as usize)
+                    .checked_mul(s.param.size as usize)
                     .ok_or(format!("mul error"))?;
                 unsafe {
-                    ptr::copy(src.param.data as *const u8, dst.param.data as *mut u8, size);
+                    ptr::copy(s.param.data as *const u8, d.param.data as *mut u8, size);
                 }
-                dst.param.handle = src.param.handle;
-                dst.param.size = src.param.size;
-                dst.param.param = src.param.param;
+                d.param.handle = s.param.handle;
+                d.param.size = s.param.size;
+                d.param.param = s.param.param;
             }
-            else if base_src.name & PRELIM_I915_USER_EXT_MASK == 2 {
-                let src = unsafe { &*(ext_src as *mut prelim_drm_i915_gem_create_ext_vm_private) };
-                let dst =
-                    unsafe { &mut *(*ext_dst as *mut prelim_drm_i915_gem_create_ext_vm_private) };
-                dst.vm_id = src.vm_id;
+            else if ext_src.name & PRELIM_I915_USER_EXT_MASK == 2 {
+                let s = unsafe { &*(src as *mut prelim_drm_i915_gem_create_ext_vm_private) };
+                let d =
+                    unsafe { &mut *(*dst as *mut prelim_drm_i915_gem_create_ext_vm_private) };
+                d.vm_id = s.vm_id;
             }
-            else if base_src.name & PRELIM_I915_USER_EXT_MASK == 3 {
-                let src = unsafe { &*(ext_src as *mut prelim_drm_i915_gem_create_ext_protected_content) };
-                let dst =
-                    unsafe { &mut *(*ext_dst as *mut prelim_drm_i915_gem_create_ext_protected_content) };
-                dst.flags = src.flags;
+            else if ext_src.name & PRELIM_I915_USER_EXT_MASK == 3 {
+                let s = unsafe { &*(src as *mut prelim_drm_i915_gem_create_ext_protected_content) };
+                let d =
+                    unsafe { &mut *(*dst as *mut prelim_drm_i915_gem_create_ext_protected_content) };
+                d.flags = s.flags;
             }
-
-            ext_src = base_src.next_extension;
-            let base_dst = unsafe { &mut *(*ext_dst as *mut i915_user_extension) };
-            ext_dst = &mut base_dst.next_extension;
-        }
-
-        Ok(())
+            Ok(())
+        })
     }
     fn free(&mut self) -> Result<(), String> {
         let mut ext = self.extensions;
@@ -325,38 +340,21 @@ impl DeepCopy<prelim_drm_i915_pxp_ops> for prelim_drm_i915_pxp_ops {
     fn alloc(&mut self, source: &prelim_drm_i915_pxp_ops) -> Result<(), String> {
         let size = self.sizeof()?;
         self.params = alloc(size)? as u64;
-        unsafe {
-            ptr::copy(source.params as *const u8, self.params as *mut u8, size);
-        }
         if self.action == 1 {
-            let src =
+            let s =
                 unsafe { &*(source.params as *mut prelim_drm_i915_pxp_tee_io_message_params) };
-            let dst =
+            let d =
                 unsafe { &mut *(self.params as *mut prelim_drm_i915_pxp_tee_io_message_params) };
-            if src.msg_in_size > 0 {
-                dst.msg_in = alloc(src.msg_in_size as usize)? as u64;
-                unsafe {
-                    ptr::copy(
-                        src.msg_in as *const u8,
-                        dst.msg_in as *mut u8,
-                        src.msg_in_size as usize,
-                    );
-                }
+            if s.msg_in_size > 0 {
+                d.msg_in = alloc(s.msg_in_size as usize)? as u64;
             }
-            if src.msg_out_buf_size > 0 {
-                dst.msg_out = alloc(src.msg_out_buf_size as usize)? as u64;
-                unsafe {
-                    ptr::copy(
-                        src.msg_out as *const u8,
-                        dst.msg_out as *mut u8,
-                        src.msg_out_buf_size as usize,
-                    );
-                }
+            if s.msg_out_buf_size > 0 {
+                d.msg_out = alloc(s.msg_out_buf_size as usize)? as u64;
             }
         }
         Ok(())
     }
-    fn copy(&mut self, source: &prelim_drm_i915_pxp_ops) -> Result<(), String> {
+    fn copy(&mut self, source: &prelim_drm_i915_pxp_ops, direction: Direction) -> Result<(), String> {
         match self.action {
             0 | 2 => unsafe {
                 ptr::copy(
@@ -366,21 +364,46 @@ impl DeepCopy<prelim_drm_i915_pxp_ops> for prelim_drm_i915_pxp_ops {
                 );
             },
             1 => {
-                let src =
+                let s =
                     unsafe { &*(source.params as *mut prelim_drm_i915_pxp_tee_io_message_params) };
-                let dst = unsafe {
+                let d = unsafe {
                     &mut *(self.params as *mut prelim_drm_i915_pxp_tee_io_message_params)
                 };
-                if src.msg_out_ret_size > 0 {
+                d.msg_in_size = s.msg_in_size;
+                d.msg_out_buf_size = s.msg_out_buf_size;
+                d.msg_out_ret_size = s.msg_out_ret_size;
+                if s.msg_in_size > 0 {
                     unsafe {
                         ptr::copy(
-                            src.msg_out as *const u8,
-                            dst.msg_out as *mut u8,
-                            src.msg_out_ret_size as usize,
+                            s.msg_in as *const u8,
+                            d.msg_in as *mut u8,
+                            s.msg_in_size as usize,
                         );
                     }
                 }
-                dst.msg_out_ret_size = src.msg_out_ret_size;
+                if direction == Direction::t2u {
+                    // t2u
+                    if s.msg_out_buf_size > 0 {
+                        unsafe {
+                            ptr::copy(
+                                s.msg_out as *const u8,
+                                d.msg_out as *mut u8,
+                                s.msg_out_buf_size as usize,
+                            );
+                        }
+                    }
+                } else {
+                    // u2t
+                    if s.msg_out_ret_size > 0 {
+                        unsafe {
+                            ptr::copy(
+                                s.msg_out as *const u8,
+                                d.msg_out as *mut u8,
+                                s.msg_out_ret_size as usize,
+                            );
+                        }
+                    }
+                }
             }
             _ => error!("the action is illegal, so do nonthing"),
         }
@@ -397,8 +420,7 @@ impl DeepCopy<prelim_drm_i915_pxp_ops> for prelim_drm_i915_pxp_ops {
                 free(param.msg_out as *mut u8, param.msg_out_buf_size as usize)?;
             }
         }
-        free(self.params as *mut u8, self.sizeof()?)?;
-        Ok(())
+        free(self.params as *mut u8, self.sizeof()?)
     }
 }
 
@@ -426,7 +448,8 @@ impl drm_i915_query {
     fn iterator(
         &mut self,
         source: &drm_i915_query,
-        f: fn(&mut drm_i915_query_item, &drm_i915_query_item) -> Result<(), String>,
+        direction: &Direction,
+        f: fn(&mut drm_i915_query_item, &drm_i915_query_item, direction: &Direction) -> Result<(), String>,
     ) -> Result<(), String> {
         let offset = mem::size_of::<drm_i915_query_item>();
         for i in 0..self.num_items {
@@ -440,7 +463,7 @@ impl drm_i915_query {
                     .add(offset.checked_mul(i as usize).ok_or(format!("mul error"))?)
                     as *mut drm_i915_query_item)
             };
-            f(d, s)?;
+            f(d, s, direction)?;
         }
         Ok(())
     }
@@ -452,43 +475,38 @@ impl DeepCopy<drm_i915_query> for drm_i915_query {
             return Ok(());
         }
         self.items_ptr = alloc(size)? as u64;
-        unsafe {
-            ptr::copy(
-                source.items_ptr as *const u8,
-                self.items_ptr as *mut u8,
-                size,
-            );
-        }
         self.iterator(
             source,
-            |dst: &mut drm_i915_query_item, src: &drm_i915_query_item| {
-                dst.query_id = src.query_id;
-                dst.length = src.length;
-                dst.flags = src.flags;
+            &Direction::none,
+            |dst: &mut drm_i915_query_item, src: &drm_i915_query_item, _direction: &Direction | {
                 if src.length > 0 {
                     dst.data_ptr = alloc(src.length as usize)? as u64;
-                    unsafe {
-                        ptr::copy(
-                            src.data_ptr as *const u8,
-                            dst.data_ptr as *mut u8,
-                            src.length as usize,
-                        );
-                    }
                 } else {
                     dst.data_ptr = crate::memory::PTR_NULL;
                 }
                 Ok(())
             },
-        )?;
-        Ok(())
+        )
     }
-    fn copy(&mut self, source: &drm_i915_query) -> Result<(), String> {
+    fn copy(&mut self, source: &drm_i915_query, direction: Direction) -> Result<(), String> {
         self.iterator(
             source,
-            |dst: &mut drm_i915_query_item, src: &drm_i915_query_item| {
-                if dst.length == 0 {
+            &direction,
+            |dst: &mut drm_i915_query_item, src: &drm_i915_query_item, direction: &Direction| -> Result<(), String> {
+                dst.query_id = src.query_id;
+                dst.flags = src.flags;
+                if direction == &Direction::t2u {
+                    // t2u
                     dst.length = src.length;
                 } else {
+                    // u2t
+                    // Note: Must check [self/dst].length value.
+                    if dst.length == 0 {
+                        dst.length = src.length;
+                        return Ok(());
+                    }
+                }
+                if dst.length > 0 {
                     unsafe {
                         ptr::copy(
                             src.data_ptr as *const u8,
@@ -498,9 +516,8 @@ impl DeepCopy<drm_i915_query> for drm_i915_query {
                     }
                 }
                 Ok(())
-            },
-        )?;
-        Ok(())
+            }
+        )
     }
     fn free(&mut self) -> Result<(), String> {
         let size = self.items_size()?;
@@ -517,8 +534,7 @@ impl DeepCopy<drm_i915_query> for drm_i915_query {
             };
             free(item.data_ptr as *mut u8, item.length as usize)?;
         }
-        free(self.items_ptr as *mut u8, size)?;
-        Ok(())
+        free(self.items_ptr as *mut u8, size)
     }
 }
 
@@ -538,6 +554,15 @@ impl drm_i915_gem_context_param {
     ) -> Result<(), String> {
         if self.size > 0 {
             self.value = alloc(self.size as usize)? as u64;
+        }
+        f(self.value, source.value)
+    }
+    fn copy(
+        &mut self,
+        source: &drm_i915_gem_context_param,
+        f: fn(dst: u64, src: u64) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if self.size > 0 {
             unsafe {
                 ptr::copy(
                     source.value as *const u8,
@@ -545,6 +570,8 @@ impl drm_i915_gem_context_param {
                     self.size as usize,
                 );
             }
+        } else {
+            self.value = source.value;
         }
         f(self.value, source.value)
     }
@@ -560,19 +587,8 @@ impl DeepCopy<drm_i915_gem_context_param> for drm_i915_gem_context_param {
     fn alloc(&mut self, source: &drm_i915_gem_context_param) -> Result<(), String> {
         self.alloc(source, |_src, _dst| -> Result<(), String> { Ok(()) })
     }
-    fn copy(&mut self, source: &drm_i915_gem_context_param) -> Result<(), String> {
-        //arg_t.value = arg_u.value;
-        match self.size {
-            0 => self.value = source.value,
-            _ => unsafe {
-                ptr::copy(
-                    source.value as *const u8,
-                    self.value as *mut u8,
-                    self.size as usize,
-                );
-            },
-        };
-        Ok(())
+    fn copy(&mut self, source: &drm_i915_gem_context_param, _: Direction) -> Result<(), String> {
+        self.copy(source, |_dst, _src| -> Result<(), String> { Ok(()) })
     }
     fn free(&mut self) -> Result<(), String> {
         self.free(|_dst| -> Result<(), String> { Ok(()) })
@@ -592,6 +608,23 @@ pub struct drm_version {
     desc_len: u64,
     desc: *const u8,
 }
+macro_rules! drm_version_copy {
+    ($src:expr, $dst:expr, $size:ident, $ptr:ident, $direction:expr) => {
+        if $dst.$size == 0 {
+            if $direction == Direction::u2t {
+                $dst.$size = $src.$size;
+            }
+        } else {
+            unsafe {
+                ptr::copy(
+                    $src.$ptr as *const u8,
+                    $dst.$ptr as *mut u8,
+                    $dst.$size as usize,
+                );
+            }
+        }
+    }
+}
 impl DeepCopy<drm_version> for drm_version {
     fn alloc(&mut self, _: &drm_version) -> Result<(), String> {
         self.name = alloc(self.name_len as usize)?;
@@ -599,9 +632,15 @@ impl DeepCopy<drm_version> for drm_version {
         self.desc = alloc(self.desc_len as usize)?;
         Ok(())
     }
-    fn copy(&mut self, source: &drm_version) -> Result<(), String> {
-        if self.name_len == 0 {
-            self.name_len = source.name_len;
+    fn copy(&mut self, source: &drm_version, direction: Direction) -> Result<(), String> {
+        // Note: Must check self.name_len, self.date_len and self.desc_len values.
+        drm_version_copy!(source, self, name_len, name, direction);
+        drm_version_copy!(source, self, date_len, date, direction);
+        drm_version_copy!(source, self, desc_len, desc, direction);
+        /*if self.name_len == 0 {
+            if direction == Direction::u2t {
+                self.name_len = source.name_len;
+            }
         } else {
             unsafe {
                 ptr::copy(
@@ -612,7 +651,9 @@ impl DeepCopy<drm_version> for drm_version {
             }
         }
         if self.date_len == 0 {
-            self.date_len = source.date_len;
+            if direction == Direction::u2t {
+                self.date_len = source.date_len;
+            }
         } else {
             unsafe {
                 ptr::copy(
@@ -623,7 +664,9 @@ impl DeepCopy<drm_version> for drm_version {
             }
         }
         if self.desc_len == 0 {
-            self.desc_len = source.desc_len;
+            if direction == Direction::u2t {
+                self.desc_len = source.desc_len;
+            }
         } else {
             unsafe {
                 ptr::copy(
@@ -632,7 +675,7 @@ impl DeepCopy<drm_version> for drm_version {
                     self.desc_len as usize,
                 );
             }
-        }
+        }*/
         Ok(())
     }
     fn free(&mut self) -> Result<(), String> {
@@ -660,15 +703,14 @@ impl DeepCopy<drm_i915_getparam> for drm_i915_getparam {
         self.value = alloc(mem::size_of::<i32>())? as *mut i32;
         Ok(())
     }
-    fn copy(&mut self, source: &drm_i915_getparam) -> Result<(), String> {
+    fn copy(&mut self, source: &drm_i915_getparam, _: Direction) -> Result<(), String> {
         unsafe {
             *self.value = *source.value;
         }
         Ok(())
     }
     fn free(&mut self) -> Result<(), String> {
-        free(self.value as *mut u8, mem::size_of::<i32>())?;
-        Ok(())
+        free(self.value as *mut u8, mem::size_of::<i32>())
     }
 }
 
@@ -753,21 +795,38 @@ impl i915_context_param_engines {
             _ => Err(format!("base.name is not supported")),
         }
     }
+    fn iterator(
+        &mut self,
+        source: &i915_context_param_engines,
+        f: fn(u64, &mut u64) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let ext_dst = &mut self.extensions;
+        let ext_src = source.extensions;
+        iterator::<_>(ext_src, ext_dst, f)
+    }
     fn alloc(&mut self, source: &i915_context_param_engines) -> Result<(), String> {
-        let mut ext_dst = &mut self.extensions;
-        let mut ext_src = source.extensions;
-        while ext_src != 0 {
-            let size = Self::sizeof(ext_src)?;
-            *ext_dst = alloc(size)? as u64;
+        self.iterator(source, |src: u64, dst: &mut u64| -> Result<(), String> {
+            let size = Self::sizeof(src)?;
+            *dst = alloc(size)? as u64;
+            let base_dst = unsafe { &mut *(*dst as *mut i915_user_extension) };
+            base_dst.next_extension = 0;  // Must clean this next extension manually.
+            Ok(())
+        })
+    }
+    fn copy(&mut self, source: &i915_context_param_engines) -> Result<(), String> {
+        self.iterator(source, |src: u64, dst: &mut u64| -> Result<(), String> {
+            let base_dst = unsafe { &mut *(*dst as *mut i915_user_extension) };
+            // Store the list
+            let next = base_dst.next_extension;
+            // Deep copy extension
+            let size = Self::sizeof(src)?;
             unsafe {
-                ptr::copy(ext_src as *const u8, *ext_dst as *mut u8, size);
+                ptr::copy(src as *const u8, *dst as *mut u8, size);
             }
-            let base_src = unsafe { &mut *(ext_src as *mut i915_user_extension) };
-            ext_src = base_src.next_extension;
-            let base_dst = unsafe { &mut *(*ext_dst as *mut i915_user_extension) };
-            ext_dst = &mut base_dst.next_extension;
-        }
-        Ok(())
+            // Restore the list
+            base_dst.next_extension = next;
+            Ok(())
+        })
     }
     fn free(&mut self) -> Result<(), String> {
         let mut ext = self.extensions;
@@ -805,7 +864,7 @@ impl drm_i915_gem_context_create_ext {
     fn iterator(
         &mut self,
         source: &drm_i915_gem_context_create_ext,
-        f: fn(&mut u64, u64) -> Result<(), String>,
+        f: fn(u64, &mut u64) -> Result<(), String>,
     ) -> Result<(), String> {
         let ext_dst = &mut self.extensions;
         let ext_src = source.extensions;
@@ -814,35 +873,19 @@ impl drm_i915_gem_context_create_ext {
 }
 impl DeepCopy<drm_i915_gem_context_create_ext> for drm_i915_gem_context_create_ext {
     fn alloc(&mut self, source: &drm_i915_gem_context_create_ext) -> Result<(), String> {
-        /*info!(
-            "drm_i915_gem_context_create_ext: ctx_id:{:?} flags:0x{:x} extensions:{:?}",
-            self.ctx_id, self.flags, self.extensions
-        );*/
-        self.iterator(source, |dst: &mut u64, src: u64| -> Result<(), String> {
-            let base_src = unsafe { &*(src as *mut i915_user_extension) };
-            let size = Self::sizeof(base_src.name)?;
-            info!("drm_i915_gem_context_create_ext: name:{:?}", base_src.name);
+        //info!("drm_i915_gem_context_create_ext: extensions:{:?}", self.extensions);
+        self.iterator(source, |src: u64, dst: &mut u64| -> Result<(), String> {
+            let ext_src = unsafe { &*(src as *mut i915_user_extension) };
+            let size = Self::sizeof(ext_src.name)?;
             *dst = alloc(size)? as u64;
-            unsafe {
-                ptr::copy(src as *const u8, *dst as *mut u8, size);
-            }
-            if base_src.name == 0 {
+            let ext_dst = unsafe { &mut *(*dst as *mut i915_user_extension) };
+            ext_dst.next_extension = 0;  // Must clean this next extension manually.
+            if ext_src.name == 0 {
                 let param_src = unsafe { &*(src as *mut drm_i915_gem_context_create_ext_setparam) };
                 let param_dst =
                     unsafe { &mut *(*dst as *mut drm_i915_gem_context_create_ext_setparam) };
-                info!(
-                    "setparam: size:{:?} param:{:?}",
-                    param_src.param.size, param_dst.param.param
-                );
                 if param_src.param.size > 0 {
                     param_dst.param.value = alloc(param_src.param.size as usize)? as u64;
-                    unsafe {
-                        ptr::copy(
-                            param_src.param.value as *const u8,
-                            param_dst.param.value as *mut u8,
-                            param_src.param.size as usize,
-                        );
-                    }
                     if param_src.param.param == I915_CONTEXT_PARAM_ENGINES {
                         info!("I915_CONTEXT_PARAM_ENGINES is called ...");
                         let context_src = unsafe {
@@ -863,24 +906,53 @@ impl DeepCopy<drm_i915_gem_context_create_ext> for drm_i915_gem_context_create_e
                 }
             }
             Ok(())
-        })?;
-        Ok(())
+        })
     }
-    fn copy(&mut self, source: &drm_i915_gem_context_create_ext) -> Result<(), String> {
+    fn copy(&mut self, source: &drm_i915_gem_context_create_ext, _: Direction) -> Result<(), String> {
         self.ctx_id = source.ctx_id;
         self.flags = source.flags;
-        self.iterator(source, |dst: &mut u64, src: u64| -> Result<(), String> {
-            let base_dst = unsafe { &*(*dst as *mut i915_user_extension) };
-            if base_dst.name == 0 {
+        // Extensions
+        self.iterator(source, |src: u64, dst: &mut u64| -> Result<(), String> {
+            let ext_src = unsafe { &*(src as *mut i915_user_extension) };
+            let ext_dst = unsafe { &mut *(*dst as *mut i915_user_extension) };
+            // Copy extension
+            ext_dst.name = ext_src.name;
+            ext_dst.flags = ext_src.flags;
+            ext_dst.rsvd = ext_src.rsvd;
+            // Deep copy extension
+            if ext_dst.name == 0 {
                 let param_dst =
                     unsafe { &mut *(*dst as *mut drm_i915_gem_context_create_ext_setparam) };
                 let param_src = unsafe { &*(src as *mut drm_i915_gem_context_create_ext_setparam) };
                 param_dst.param.ctx_id = param_src.param.ctx_id;
                 param_dst.param.size = param_src.param.size;
+                param_dst.param.param = param_src.param.param;
+                if param_src.param.size > 0 {
+                    unsafe {
+                        ptr::copy(
+                            param_src.param.value as *const u8,
+                            param_dst.param.value as *mut u8,
+                            param_src.param.size as usize,
+                        );
+                    }
+                    if param_src.param.param == I915_CONTEXT_PARAM_ENGINES {
+                        let context_src = unsafe {
+                            &mut *(param_src.param.value as *mut drm_i915_gem_context_param)
+                        };
+                        let context_dst = unsafe {
+                            &mut *(param_dst.param.value as *mut drm_i915_gem_context_param)
+                        };
+                        context_dst.copy(context_src, |src, dst| -> Result<(), String> {
+                            let engines_src = unsafe { &*(src as *mut i915_context_param_engines) };
+                            let engines_dst =
+                                unsafe { &mut *(dst as *mut i915_context_param_engines) };
+                            engines_dst.copy(engines_src)
+                        })?;
+                    }
+                }
             }
             Ok(())
-        })?;
-        Ok(())
+        })
     }
     fn free(&mut self) -> Result<(), String> {
         let mut ext = self.extensions;
@@ -889,13 +961,6 @@ impl DeepCopy<drm_i915_gem_context_create_ext> for drm_i915_gem_context_create_e
             // Free other sub-items here.
             if base.name == 0 {
                 let param = unsafe { &mut *(ext as *mut drm_i915_gem_context_create_ext_setparam) };
-                /*unsafe {
-                    ptr::copy(
-                        param_u.param.value as *const u8,
-                        param_t.param.value as *mut u8,
-                        param_t.param.size as usize,
-                    );
-                }*/
                 let context_dst =
                     unsafe { &mut *(param.param.value as *mut drm_i915_gem_context_param) };
                 context_dst.free(|dst| -> Result<(), String> {
@@ -1000,7 +1065,7 @@ impl drm_i915_gem_vm_control {
     fn iterator(
         &mut self,
         source: &drm_i915_gem_vm_control,
-        f: fn(&mut u64, u64) -> Result<(), String>,
+        f: fn(u64, &mut u64) -> Result<(), String>,
     ) -> Result<(), String> {
         let ext_dst = &mut self.extensions;
         let ext_src = source.extensions;
@@ -1009,21 +1074,26 @@ impl drm_i915_gem_vm_control {
 }
 impl DeepCopy<drm_i915_gem_vm_control> for drm_i915_gem_vm_control {
     fn alloc(&mut self, source: &drm_i915_gem_vm_control) -> Result<(), String> {
-        self.iterator(source, |dst: &mut u64, src: u64| -> Result<(), String> {
-            let base_src = unsafe { &*(src as *mut i915_user_extension) };
-            let size = Self::sizeof(base_src.name & PRELIM_I915_USER_EXT_MASK)?;
+        self.iterator(source, |src: u64, dst: &mut u64| -> Result<(), String> {
+            let ext_src = unsafe { &*(src as *mut i915_user_extension) };
+            let size = Self::sizeof(ext_src.name & PRELIM_I915_USER_EXT_MASK)?;
             *dst = alloc(size)? as u64;
+            let ext_dst = unsafe { &mut *(*dst as *mut i915_user_extension) };
+            ext_dst.next_extension = 0;  // Must clean this next extension manually.
+            Ok(())
+        })
+    }
+    fn copy(&mut self, source: &drm_i915_gem_vm_control, _: Direction) -> Result<(), String> {
+        self.vm_id = source.vm_id;
+        self.flags = source.flags;
+        self.iterator(source, |src: u64, dst: &mut u64| -> Result<(), String> {
+            let ext_src = unsafe { &*(src as *mut i915_user_extension) };
+            let size = Self::sizeof(ext_src.name & PRELIM_I915_USER_EXT_MASK)?;
             unsafe {
                 ptr::copy(src as *const u8, *dst as *mut u8, size);
             }
             Ok(())
-        })?;
-        Ok(())
-    }
-    fn copy(&mut self, source: &drm_i915_gem_vm_control) -> Result<(), String> {
-        self.vm_id = source.vm_id;
-        self.flags = source.flags;
-        Ok(())
+        })
     }
     fn free(&mut self) -> Result<(), String> {
         let mut ext = self.extensions;
@@ -1121,30 +1191,16 @@ impl DeepCopy<drm_i915_gem_execbuffer2> for drm_i915_gem_execbuffer2 {
                 .checked_mul(source.buffer_count as usize)
                 .ok_or(format!("mul error"))?;
             self.buffers_ptr = alloc(size)? as u64;
-            unsafe {
-                ptr::copy(
-                    source.buffers_ptr as *const u8,
-                    self.buffers_ptr as *mut u8,
-                    size,
-                );
-            }
         }
         if source.num_cliprects > 0 {
             let size = mem::size_of::<drm_i915_gem_exec_fence>()
                 .checked_mul(source.num_cliprects as usize)
                 .ok_or(format!("mul error"))?;
             self.cliprects_ptr = alloc(size)? as u64;
-            unsafe {
-                ptr::copy(
-                    source.cliprects_ptr as *const u8,
-                    self.cliprects_ptr as *mut u8,
-                    size,
-                );
-            }
         }
         Ok(())
     }
-    fn copy(&mut self, source: &drm_i915_gem_execbuffer2) -> Result<(), String> {
+    fn copy(&mut self, source: &drm_i915_gem_execbuffer2, _: Direction) -> Result<(), String> {
         if self.buffer_count > 0 {
             let size = mem::size_of::<drm_i915_gem_exec_object2>()
                 .checked_mul(self.buffer_count as usize)
@@ -1228,19 +1284,12 @@ struct drm_i915_gem_pread {
 }
 impl DeepCopy<drm_i915_gem_pread> for drm_i915_gem_pread {
     fn alloc(&mut self, source: &drm_i915_gem_pread) -> Result<(), String> {
-        if self.size > 0 {
-            self.data_ptr = alloc(self.size as usize)? as u64;
-            unsafe {
-                ptr::copy(
-                    source.data_ptr as *mut u8,
-                    self.data_ptr as *mut u8,
-                    self.size as usize,
-                );
-            }
+        if source.size > 0 {
+            self.data_ptr = alloc(source.size as usize)? as u64;
         }
         Ok(())
     }
-    fn copy(&mut self, source: &drm_i915_gem_pread) -> Result<(), String> {
+    fn copy(&mut self, source: &drm_i915_gem_pread, _: Direction) -> Result<(), String> {
         if self.size > 0 {
             unsafe {
                 ptr::copy(
@@ -1271,19 +1320,12 @@ struct drm_i915_gem_pwrite {
 }
 impl DeepCopy<drm_i915_gem_pwrite> for drm_i915_gem_pwrite {
     fn alloc(&mut self, source: &drm_i915_gem_pwrite) -> Result<(), String> {
-        if self.size > 0 {
-            self.data_ptr = alloc(self.size as usize)? as u64;
-            unsafe {
-                ptr::copy(
-                    source.data_ptr as *mut u8,
-                    self.data_ptr as *mut u8,
-                    self.size as usize,
-                );
-            }
+        if source.size > 0 {
+            self.data_ptr = alloc(source.size as usize)? as u64;
         }
         Ok(())
     }
-    fn copy(&mut self, source: &drm_i915_gem_pwrite) -> Result<(), String> {
+    fn copy(&mut self, source: &drm_i915_gem_pwrite, _: Direction) -> Result<(), String> {
         if self.size > 0 {
             unsafe {
                 ptr::copy(
@@ -1322,7 +1364,8 @@ fn drm_default_ioctl(_fd: i32, cmd: &u32, _arg: *const u8) -> Result<i32, String
 
 #[no_mangle]
 pub fn pxp_ioctl(fd: i32, cmd: u32, arg: *const u8) -> i32 {
-    match cmd {
+    info!("PXP cmd: {:?} Enter", &cmd);
+    let ret = match cmd {
         // Consumed by i915 driver's drm_gem_close_ioctl()
         DRM_IOCTL_GEM_CLOSE => exec::<drm_gem_close_t>(fd, &cmd, arg),
         // Consumed by i915 driver's drm_getmagic()
@@ -1395,7 +1438,9 @@ pub fn pxp_ioctl(fd: i32, cmd: u32, arg: *const u8) -> i32 {
         DRM_IOCTL_I915_GEM_MMAP => exec::<drm_i915_gem_mmap>(fd, &cmd, arg),
         _ => drm_default_ioctl(fd, &cmd, arg),
     }
-    .unwrap()
+    .unwrap();
+    info!("PXP cmd: {:?} Exit", &cmd);
+    ret
 }
 
 cfg_if::cfg_if! {

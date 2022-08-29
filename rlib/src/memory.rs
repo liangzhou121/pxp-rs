@@ -3,7 +3,7 @@ use alloc::alloc::Layout;
 use alloc::string::String;
 use cfg_if;
 use core::ffi::c_void;
-use ctor::dtor;
+//use ctor::dtor;
 use sgx_types::sgx_status_t;
 cfg_if::cfg_if! {
     if #[cfg(feature = "occlum")] {
@@ -32,7 +32,7 @@ fn untrusted_mem_alloc(size: usize) -> Result<(), String> {
     cfg_if::cfg_if! {
         if #[cfg(feature = "occlum")] {
             info!(
-                "pxp-rs: allocate untrusted memory: [ 0x{:x} ]",
+                "pxp-rs:v1: allocate untrusted memory: [ 0x{:x} ]",
                 &chunk
             );
             let sgx_status = unsafe {
@@ -78,6 +78,7 @@ fn untrusted_mem_free() {
 
 pub fn alloc(size: usize) -> Result<*mut u8, String> {
     let ptr = if size > 0 {
+        //info!("alloc: size:{:?}", size);
         let layout = Layout::from_size_align(size, 1).unwrap();
         let ptr = MANAGER.alloc(layout);
         match ptr {
@@ -95,6 +96,7 @@ pub fn alloc(size: usize) -> Result<*mut u8, String> {
 
 pub fn free(ptr: *mut u8, size: usize) -> Result<(), String> {
     if ptr as u64 != PTR_NULL {
+        //info!("free: size:{:?}", size);
         let layout = Layout::from_size_align(size, 1).unwrap();
         MANAGER.dealloc(core::ptr::NonNull::new(ptr).unwrap(), layout);
     }
@@ -110,7 +112,7 @@ cfg_if::cfg_if! {
                 align: usize, // must be power of two and a multiple of sizeof(void*)
                 size: usize,
             ) -> sgx_status_t;
-            fn occlum_ocall_free(ptr: *mut c_void) -> sgx_status_t;
+            //fn occlum_ocall_free(ptr: *mut c_void) -> sgx_status_t;
         }
     } else {
         extern "C" {

@@ -1,0 +1,76 @@
+{
+    "resource_limits": {
+        "kernel_space_heap_size": "32MB",
+        "kernel_space_stack_size": "1MB",
+        "user_space_size": "1024MB",
+        "max_num_of_threads": 32
+    },
+    "process": {
+        "default_stack_size": "4MB",
+        "default_heap_size": "32MB",
+        "default_mmap_size": "1024MB"
+    },
+    "entry_points": [
+        "/bin"
+    ],
+    "env": {
+        "default": [
+            "OCCLUM=yes",
+            "LD_LIBRARY_PATH=/opt/intel/oneapi/compiler/2021.4.0/linux/lib:/opt/intel/oneapi/compiler/2021.4.0/linux/compiler/lib/intel64_lin:/opt/intel/oneapi/tbb/2021.4.0/lib/intel64/gcc4.8:/usr/lib/x86_64-linux-gnu:/opt/intel/oneapi/compiler/2021.4.0/linux/lib/x64"
+        ],
+        "untrusted": [
+            "EXAMPLE"
+        ]
+    },
+    "metadata": {
+        "product_id": 0,
+        "version_number": 0,
+        "debuggable": true,
+        "enable_kss": false,
+        "family_id": {
+            "high": "0x0",
+            "low": "0x0"
+        },
+        "ext_prod_id": {
+            "high": "0x0",
+            "low": "0x0"
+        },
+        "pkru": 0
+    },
+    "mount": [
+        {
+            "target": "/",
+            "type": "unionfs",
+            "options": {
+                "layers": [
+                    {
+                        "target": "/",
+                        "type": "sefs",
+                        "source": "./build/mount/__ROOT",
+                        "options": {
+                            "MAC": ""
+                        }
+                    },
+                    {
+                        "target": "/",
+                        "type": "sefs",
+                        "source": "./run/mount/__ROOT"
+                    }
+                ]
+            }
+        },
+        {
+            "target": "/host",
+            "type": "hostfs",
+            "source": "."
+        },
+        {
+            "target": "/proc",
+            "type": "procfs"
+        },
+        {
+            "target": "/dev",
+            "type": "devfs"
+        }
+    ]
+}

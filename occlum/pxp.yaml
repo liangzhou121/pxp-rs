@@ -1,0 +1,55 @@
+includes:
+  - base.yaml
+targets:
+  - target: /bin
+    copy:
+      - files:
+        - ../primitives-matmul-cpp
+  - target: /usr/lib/x86_64-linux-gnu/
+    copy:
+      - files: 
+          - /usr/lib/x86_64-linux-gnu/libva-x11.so.2
+          - /usr/lib/x86_64-linux-gnu/libopencl-clang.so.10
+          - /usr/lib/x86_64-linux-gnu/libigdfcl.so.1
+          - /usr/lib/x86_64-linux-gnu/libz.so.1
+          - /usr/lib/x86_64-linux-gnu/libigc.so.1
+  # dri
+  - target: /usr/lib/x86_64-linux-gnu/dri/
+    copy:
+      - files: 
+          - /usr/lib/x86_64-linux-gnu/dri/iHD_drv_video.so
+  # intel-opencl
+  - target: /usr/lib/x86_64-linux-gnu/intel-opencl
+    copy:
+      - files: 
+          - /usr/lib/x86_64-linux-gnu/intel-opencl/libigdrcl.so
+  # tbb
+  - target: /opt/intel/oneapi/tbb/2021.4.0/lib/intel64/gcc4.8/
+    copy:
+      - files: 
+          - /opt/intel/oneapi/tbb/2021.4.0/lib/intel64/gcc4.8/libtbb_debug.so.12
+          - /opt/intel/oneapi/tbb/2021.4.0/lib/intel64/gcc4.8/libtbb.so.12
+          - /opt/intel/oneapi/tbb/2021.4.0/lib/intel64/gcc4.8/libtbbmalloc.so.2
+  #
+  - target: /opt/intel/oneapi/compiler/2021.4.0/linux/lib
+    copy:
+      - files: 
+          - /opt/intel/oneapi/compiler/2021.4.0/linux/lib/sycl.conf
+          - /opt/intel/oneapi/compiler/2021.4.0/linux/lib/libpi_opencl.so
+  # x64
+  - target: /opt/intel/oneapi/compiler/2021.4.0/linux/lib/x64/
+    copy:
+      - files: 
+          - /opt/intel/oneapi/compiler/2021.4.0/linux/lib/x64/libintelocl.so
+          - /opt/intel/oneapi/compiler/2021.4.0/linux/lib/x64/libtask_executor.so.2021.12.9.0
+          - /opt/intel/oneapi/compiler/2021.4.0/linux/lib/x64/libcl_logger.so.2021.12.9.0
+          - /opt/intel/oneapi/compiler/2021.4.0/linux/lib/x64/libcpu_device.so.2021.12.9.0
+          - /opt/intel/oneapi/compiler/2021.4.0/linux/lib/x64/cl.cfg
+  # OpenCL
+  - target: /etc/OpenCL/vendors
+    copy:
+      - files: 
+          - /etc/OpenCL/vendors/Altera.icd
+          - /etc/OpenCL/vendors/intel-cpu.icd
+          - /etc/OpenCL/vendors/Intel_FPGA_SSG_Emulator.icd
+          - /etc/OpenCL/vendors/intel.icd

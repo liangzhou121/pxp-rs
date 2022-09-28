@@ -1259,16 +1259,11 @@ struct drm_i915_gem_userptr {
     handle: u32,
 }
 fn i915_gem_userptr_ioctl(fd: i32, cmd: &u32, arg: *const u8) -> Result<i32, String> {
-    let ptr_t = arg as *mut u8;
-    let _arg_t = unsafe { &mut *(ptr_t as *mut drm_i915_gem_userptr) };
-
-    /*let outside_enclave = sgx_trts::trts::rsgx_raw_is_outside_enclave(
-        arg_t.user_ptr as *const u8,
-        arg_t.user_size as usize,
-    );
-    // The user_ptr must outside enclave and should be set by applcation.
-    info!("<drm_i915_gem_userptr> is outside enclave:{:?}", outside_enclave);*/
-
+    let arg_t = unsafe { &*(arg as *mut u8 as *mut drm_i915_gem_userptr) };
+    if !sgx_trts::trts::rsgx_raw_is_outside_enclave(arg_t.user_ptr as *const u8, arg_t.user_size as usize) {
+        // Error: The user_ptr must outside enclave and should be set by applcation
+        return Err(format!("Can't map TRUSTED userptr: 0x{:x}", arg_t.user_ptr));
+    }
     exec::<drm_i915_gem_userptr>(fd, cmd, arg)
 }
 
@@ -1413,7 +1408,7 @@ pub fn pxp_ioctl(fd: i32, cmd: u32, arg: *const u8) -> i32 {
         // Consumed by i915 driver's i915_gem_execbuffer2_ioctl()
         DRM_IOCTL_I915_GEM_EXECBUFFER2 => exec2::<drm_i915_gem_execbuffer2>(fd, &cmd, arg),
         // Consumed by i915 driver's i915_gem_userptr_ioctl()
-        DRM_IOCTL_I915_GEM_USERPTR => exec::<drm_i915_gem_userptr>(fd, &cmd, arg),
+        DRM_IOCTL_I915_GEM_USERPTR => i915_gem_userptr_ioctl(fd, &cmd, arg),
         // Consumed by i915 driver's i915_gem_get_tiling_ioctl()
         DRM_IOCTL_I915_GEM_GET_TILING => exec::<drm_i915_gem_get_tiling>(fd, &cmd, arg),
         // Consumed by i915 driver's i915_gem_wait_ioctl()
